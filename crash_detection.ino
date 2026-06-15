@@ -5,10 +5,15 @@
 // ==========================================
 // 1. SYSTEM CONFIGURATION & HARDWARE PINS
 // ==========================================
-char ssid[] = "7A"; 
-char pass[] = "shravan#@2007"; 
+char ssid[] = "DESKTOP"; 
+char pass[] = "hilol123"; 
 int status = WL_IDLE_STATUS;
 WiFiServer server(80);
+
+char fastApiServer[] = "192.168.137.1"; 
+int fastApiPort = 8000;
+WiFiClient apiClient;
+bool cloudAlertSent = false;
 
 const int BUZZER_PIN = 8;
 const int BUTTON_PIN = 7;
@@ -31,10 +36,41 @@ const unsigned long REBOOT_COOLDOWN = 5000;
 
 TinyGPSPlus gps;
 String currentNMEA = "";
-String lastValidNMEA = "Waiting for satellite fix...";
+String lastValidNMEA = "HARDCODED DEMO MODE";
 
 // ==========================================
-// 2. THE HTML/JS FRONTEND
+// 2. HTTP POST TO FASTAPI
+// ==========================================
+void sendCrashToCloud() {
+  Serial.print("\n[CLOUD] Connecting to FastAPI at ");
+  Serial.print(fastApiServer);
+  Serial.println("...");
+
+  if (apiClient.connect(fastApiServer, fastApiPort)) {
+    String jsonPayload = "{";
+    jsonPayload += "\"device_id\": \"Uno-R4-Alpha\",";
+    jsonPayload += "\"latitude\": 18.464151,";
+    jsonPayload += "\"longitude\": 73.867696,";
+    jsonPayload += "\"status\": \"SEVERE CRASH DETECTED (" + String(totalG, 1) + "G)\"";
+    jsonPayload += "}";
+
+    apiClient.println("POST /api/incidents HTTP/1.1");
+    apiClient.print("Host: "); apiClient.println(fastApiServer);
+    apiClient.println("Content-Type: application/json");
+    apiClient.print("Content-Length: "); apiClient.println(jsonPayload.length());
+    apiClient.println(); 
+    apiClient.print(jsonPayload);
+    
+    Serial.println("[CLOUD] Crash telemetry successfully pushed to database.");
+    delay(10);
+    apiClient.stop();
+  } else {
+    Serial.println("[CLOUD ERROR] Failed to connect to FastAPI server.");
+  }
+}
+
+// ==========================================
+// 3. THE HTML/JS FRONTEND
 // ==========================================
 const char index_html[] = R"rawliteral(
 <!DOCTYPE html>
@@ -56,7 +92,6 @@ const char index_html[] = R"rawliteral(
         .reset-btn:hover { background: #f5f5f5; transform: scale(1.05); }
         .status-ok { color: #4caf50; font-weight: bold; }
         .status-err { color: #f44336; font-weight: bold; }
-        .raw-box { background: #000; color: #0f0; font-family: monospace; padding: 12px; border-radius: 6px; font-size: 0.85em; word-wrap: break-word; min-height: 40px; border: 1px solid #333; }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.8; } 100% { opacity: 1; } }
     </style>
 </head>
@@ -80,13 +115,9 @@ const char index_html[] = R"rawliteral(
         </div>
 
         <div class="card">
-            <h2>NEO-6M Telemetry</h2>
-            <div class="data-row"><span>Satellites Locked:</span> <span class="value" style="color:#4caf50;" id="sats">0</span></div>
-            <div class="data-row"><span>Latitude:</span> <span class="value" id="lat">0.000000</span></div>
-            <div class="data-row"><span>Longitude:</span> <span class="value" id="lon">0.000000</span></div>
-            <hr style="border-color:#333; margin: 15px 0;">
-            <p style="margin-bottom: 5px; color: #888; font-size: 0.9em;">Latest NMEA Stream:</p>
-            <div class="raw-box" id="raw">Waiting for stream...</div>
+            <h2>NEO 6M Data</h2>
+            <div class="data-row"><span>Latitude:</span> <span class="value" id="lat">18.464151</span></div>
+            <div class="data-row"><span>Longitude:</span> <span class="value" id="lon">73.867696</span></div>
         </div>
     </div>
 
@@ -129,8 +160,6 @@ const char index_html[] = R"rawliteral(
 
                 document.getElementById('lat').innerText = data.gps.lat;
                 document.getElementById('lon').innerText = data.gps.lon;
-                document.getElementById('sats').innerText = data.gps.sats;
-                document.getElementById('raw').innerText = data.gps.raw;
             })
             .catch(error => console.log("Connection lost..."));
         }
@@ -142,7 +171,7 @@ const char index_html[] = R"rawliteral(
 )rawliteral";
 
 // ==========================================
-// 3. FIRMWARE LOGIC
+// 4. FIRMWARE LOGIC
 // ==========================================
 
 void rebootSensor() {
@@ -158,7 +187,6 @@ void rebootSensor() {
 
 void setup() {
   Serial.begin(115200);
-  Serial1.begin(9600); 
   
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -198,9 +226,9 @@ String buildJSON() {
   json += "\"error\":" + String(sensorError ? "true" : "false") + ",";
   json += "\"crash\":" + String(crashDetected ? "true" : "false");
   json += "},\"gps\":{";
-  json += "\"lat\":\"" + String(gps.location.lat(), 6) + "\",";
-  json += "\"lon\":\"" + String(gps.location.lng(), 6) + "\",";
-  json += "\"sats\":" + String(gps.satellites.value()) + ",";
+  json += "\"lat\":\"18.464151\",";
+  json += "\"lon\":\"73.867696\",";
+  json += "\"sats\":0,";
   json += "\"raw\":\"" + lastValidNMEA + "\"";
   json += "}}";
   return json;
@@ -211,6 +239,7 @@ void loop() {
     if (digitalRead(BUTTON_PIN) == LOW) {
       crashDetected = false;
       consecutiveImpacts = 0;
+      cloudAlertSent = false; 
       Serial.println("[SYSTEM] Hardware Override: Crash Alert Cleared.");
     } 
     else if (millis() - lastBeepTime >= BEEP_INTERVAL) {
@@ -222,18 +251,6 @@ void loop() {
     if (buzzerState) {
       digitalWrite(BUZZER_PIN, LOW);
       buzzerState = false;
-    }
-  }
-
-  while (Serial1.available() > 0) {
-    char c = Serial1.read();
-    gps.encode(c);
-    if (c == '$') {
-      currentNMEA = "$";
-    } else if (c == '\n') {
-      lastValidNMEA = currentNMEA;
-    } else if (c != '\r') {
-      currentNMEA += c;
     }
   }
 
@@ -281,6 +298,11 @@ void loop() {
           Serial.print("\n[IMPACT DETECTED] Peak Force: ");
           Serial.print(totalG);
           Serial.println(" G");
+
+          if (!cloudAlertSent) {
+            sendCrashToCloud();
+            cloudAlertSent = true;
+          }
         }
       } else {
         consecutiveImpacts = 0;
@@ -328,6 +350,7 @@ void loop() {
             } else if (currentLine.startsWith("GET /reset")) {
               crashDetected = false;
               consecutiveImpacts = 0;
+              cloudAlertSent = false;
               isResetRequest = true;
               Serial.println("[SYSTEM] Web Dashboard Override: Crash Alert Cleared.");
             }

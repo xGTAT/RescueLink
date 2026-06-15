@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RescueLink Cloud Portal</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        /* LIGHT THEME CSS */
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #f4f6f8; color: #333; margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; }
+        header { margin-bottom: 20px; }
+        h1 { margin: 0; color: #2c3e50; letter-spacing: 0.5px; }
+        
+        .dashboard-container { display: flex; gap: 20px; flex: 1; min-height: 0; }
+        
+        #map { flex: 2; background: #fff; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); border: 1px solid #e0e0e0; }
+        
+        .sidebar { flex: 1; background: #fff; border-radius: 12px; display: flex; flex-direction: column; padding: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); border: 1px solid #e0e0e0; }
+        .sidebar h2 { margin-top: 0; color: #1976d2; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        
+        .log-container { overflow-y: auto; flex: 1; margin-top: 10px; padding-right: 5px; }
+        
+        .incident-card { background: #fafafa; border: 1px solid #eee; border-left: 4px solid #ffb74d; padding: 12px; margin-bottom: 10px; border-radius: 6px; font-family: monospace; cursor: pointer; transition: 0.2s; }
+        .incident-card:hover { background: #f0f4f8; transform: translateX(3px); border-color: #d0d7de; }
+        .incident-card.severe { border-left-color: #e53935; }
+        
+        .card-row { display: flex; justify-content: space-between; margin: 4px 0; }
+        .lbl { color: #666; }
+        .val { color: #111; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>RescueLink Cloud Monitoring Station</h1>
+    </header>
+
+    <div class="dashboard-container">
+        <div id="map"></div>
+
+        <div class="sidebar">
+            <h2>Logged Incidents</h2>
+            <div id="log-stream" class="log-container">Loading streaming logs...</div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        const API_URL = "http://127.0.0.1:8000/api/incidents";
+        
+        // Initialize Map centered directly on the hardcoded coordinates
+        const map = L.map('map').setView([18.464151, 73.867696], 15);
+        
+        // Load Standard Light-Themed OpenStreetMap tiles
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+
+        let markersLayer = L.layerGroup().addTo(map);
+
+        function formatDate(timestampz) {
+            const date = new Date(timestampz);
+            return date.toLocaleTimeString() + ' ' + date.toLocaleDateString();
+        }
+
+        // Only move the map when a card is actively clicked
+        function focusMap(lat, lon, id) {
+            map.flyTo([lat, lon], 16, { duration: 1.5 });
+        }
+
+        function refreshDashboard() {
+            fetch(API_URL)
+                .then(res => res.json())
+                .then(data => {
+                    const logContainer = document.getElementById("log-stream");
+                    logContainer.innerHTML = "";
+                    markersLayer.clearLayers();
+
+                    if (!data || data.length === 0) {
+                        logContainer.innerHTML = "<p style='color:#888;'>No incidents on record.</p>";
+                        return;
+                    }
+
+                    data.forEach((incident) => {
+                        // --- TEMPORARY GPS OVERRIDE ---
+                        // Hardcoding the location until the hardware fix is confirmed
+                        incident.latitude = 18.464151;
+                        incident.longitude = 73.867696;
+                        // ------------------------------
+
+                        const isSevere = incident.status.toLowerCase().includes("severe") || incident.status.toLowerCase().includes("crash");
+                        
+                        // Build card
+                        const card = document.createElement("div");
+                        card.className = `incident-card ${isSevere ? 'severe' : ''}`;
+                        card.onclick = () => focusMap(incident.latitude, incident.longitude, incident.id);
+                        
+                        card.innerHTML = `
+                            <div class="card-row"><span class="lbl">ID:</span><span class="val">#${incident.id}</span></div>
+                            <div class="card-row"><span class="lbl">Device:</span><span class="val">${incident.device_id}</span></div>
+                            <div class="card-row"><span class="lbl">Status:</span><span class="val" style="color:${isSevere ? '#e53935':'#ff9800'}">${incident.status}</span></div>
+                            <div class="card-row"><span class="lbl">Time:</span><span class="val" style="font-size:0.9em;">${formatDate(incident.created_at)}</span></div>
+                        `;
+                        logContainer.appendChild(card);
+
+                        // Build Map Marker
+                        const marker = L.marker([incident.latitude, incident.longitude])
+                            .bindPopup(`
+                                <div style="font-family: sans-serif;">
+                                    <b style="color: #1976d2; font-size: 1.1em;">Incident #${incident.id}</b><br>
+                                    <hr style="border: 0; border-top: 1px solid #eee; margin: 5px 0;">
+                                    <b>Device:</b> ${incident.device_id}<br>
+                                    <b>Status:</b> ${incident.status}<br>
+                                    <b>Date:</b> ${formatDate(incident.created_at)}
+                                </div>
+                            `);
+                        markersLayer.addLayer(marker);
+                        
+                        // REMOVED: The auto-focus block that was resetting the camera every 5 seconds
+                    });
+                })
+                .catch(err => console.error("Waiting for API Connection...", err));
+        }
+
+        // Initialize polling baseline execution loop (fetches updates every 5 seconds)
+        refreshDashboard();
+        setInterval(refreshDashboard, 5000);
+    </script>
+</body>
+</html>
